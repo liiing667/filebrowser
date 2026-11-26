@@ -268,7 +268,22 @@ func resourcePatchHandler(fileCache FileCache) handleFunc {
 		}
 
 		err = d.RunHook(func() error {
-			return patchAction(r.Context(), action, src, dst, d, fileCache)
+			if err := patchAction(r.Context(), action, src, dst, d, fileCache); err != nil {
+				return err
+			}
+
+			// Share links persist their scope-relative path. A rename that
+			// succeeds on disk must move those records in the same request,
+			// otherwise a reopened/public consumer can keep using a stale
+			// path identity. Surface metadata failures instead of reporting a
+			// successful rename whose durable security state was not moved.
+			if action == "rename" {
+				if err := d.store.Share.MovePathPrefixWithFold(src, dst, d.user.ID, d.server.CaseInsensitiveFs); err != nil {
+					log.Printf("WARNING: failed to move shares with renamed path %q to %q: %v", src, dst, err)
+					return err
+				}
+			}
+			return nil
 		}, action, src, dst, d.user)
 
 		return errToStatus(err), err
