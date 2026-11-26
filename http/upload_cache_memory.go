@@ -3,12 +3,17 @@ package fbhttp
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/jellydator/ttlcache/v3"
 )
 
 const uploadCacheTTL = 3 * time.Minute
+
+// failedUploadCleanupRetry bounds how long a failed scoped removal is retained
+// before the cache tries to clean up the abandoned partial upload again.
+var failedUploadCleanupRetry = time.Minute
 
 // UploadCache is an interface for tracking active uploads.
 // Allows for different backends (e.g. in-memory or redis)
@@ -35,13 +40,15 @@ type UploadCache interface {
 
 // memoryUploadEntry is the value stored for each active upload.
 type memoryUploadEntry struct {
-	size   int64
-	remove func() error
+	size       int64
+	remove     func() error
+	generation uint64
 }
 
 // memoryUploadCache is an upload cache for single replica deployments
 type memoryUploadCache struct {
-	cache *ttlcache.Cache[string, memoryUploadEntry]
+	nextID atomic.Uint64
+	cache  *ttlcache.Cache[string, memoryUploadEntry]
 }
 
 func newMemoryUploadCache() *memoryUploadCache {
@@ -56,6 +63,15 @@ func newMemoryUploadCache() *memoryUploadCache {
 			if remove := item.Value().remove; remove != nil {
 				if err := remove(); err != nil {
 					fmt.Printf("failed to delete incomplete upload file %q: %v\n", item.Key(), err)
+					// Eviction has already removed the entry, but cleanup did
+					// not succeed. Put the same generation back so the failed
+					// cleanup remains observable and is retried instead of
+					// silently becoming an untracked, reusable old path.
+					value := item.Value()
+					key := item.Key()
+					// Eviction runs while the cache mutex is held; reinsert
+					// asynchronously to avoid re-entering Set synchronously.
+					go func() { cache.Set(key, value, failedUploadCleanupRetry) }()
 				}
 			}
 		}
@@ -66,7 +82,12 @@ func newMemoryUploadCache() *memoryUploadCache {
 }
 
 func (c *memoryUploadCache) Register(filePath string, fileSize int64, remove func() error) {
-	c.cache.Set(filePath, memoryUploadEntry{size: fileSize, remove: remove}, uploadCacheTTL)
+	generation := c.nextID.Add(1)
+	c.cache.Set(filePath, memoryUploadEntry{
+		size:       fileSize,
+		remove:     remove,
+		generation: generation,
+	}, uploadCacheTTL)
 }
 
 func (c *memoryUploadCache) Complete(filePath string) {

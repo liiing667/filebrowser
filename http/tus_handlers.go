@@ -20,6 +20,18 @@ import (
 // beyond that the body is not worth reading just to throw away.
 const maxPatchDrainBytes = 32 << 20 // 32MB
 
+// uploadCacheKey binds upload state to the canonical scoped real path. The real
+// path already contains the owner's scope; on case-insensitive servers fold
+// case as well, so equivalent retries cannot create two generations for the
+// same object.
+func uploadCacheKey(d *data, file *files.FileInfo) string {
+	key := file.RealPath()
+	if d != nil && d.server != nil && d.server.CaseInsensitiveFs {
+		key = strings.ToLower(key)
+	}
+	return key
+}
+
 // drainRequestBody discards what the client already put on the wire for a
 // request the handler answered without reading. net/http only drains 256KiB on
 // its own before giving up and closing the connection, and a connection closed
@@ -131,7 +143,8 @@ func tusPostHandler(cache UploadCache) handleFunc {
 		// The removal callback deletes an abandoned upload through the user's
 		// scoped filesystem, so eviction cannot follow a symlink out of scope.
 		uploadPath := r.URL.Path
-		cache.Register(file.RealPath(), uploadLength, func() error {
+		cacheKey := uploadCacheKey(d, file)
+		cache.Register(cacheKey, uploadLength, func() error {
 			return d.user.Fs.Remove(uploadPath)
 		})
 
@@ -164,7 +177,8 @@ func tusHeadHandler(cache UploadCache) handleFunc {
 			return errToStatus(err), err
 		}
 
-		uploadLength, err := cache.GetLength(file.RealPath())
+		cacheKey := uploadCacheKey(d, file)
+		uploadLength, err := cache.GetLength(cacheKey)
 		if err != nil {
 			return http.StatusNotFound, err
 		}
@@ -218,7 +232,8 @@ func tusPatchUpload(w http.ResponseWriter, r *http.Request, d *data, cache Uploa
 		return errToStatus(err), err
 	}
 
-	uploadLength, err := cache.GetLength(file.RealPath())
+	cacheKey := uploadCacheKey(d, file)
+	uploadLength, err := cache.GetLength(cacheKey)
 	if err != nil {
 		return http.StatusNotFound, err
 	}
@@ -228,7 +243,7 @@ func tusPatchUpload(w http.ResponseWriter, r *http.Request, d *data, cache Uploa
 	}
 
 	// Prevent the upload from being evicted during the transfer
-	stop := keepUploadActive(cache, file.RealPath())
+	stop := keepUploadActive(cache, cacheKey)
 	defer stop()
 
 	switch {
@@ -286,7 +301,7 @@ func tusPatchUpload(w http.ResponseWriter, r *http.Request, d *data, cache Uploa
 	w.Header().Set("Upload-Offset", strconv.FormatInt(newOffset, 10))
 
 	if newOffset >= uploadLength {
-		cache.Complete(file.RealPath())
+		cache.Complete(cacheKey)
 		_ = d.RunHook(func() error { return nil }, "upload", r.URL.Path, "", d.user)
 	}
 
@@ -311,7 +326,8 @@ func tusDeleteHandler(cache UploadCache) handleFunc {
 			return errToStatus(err), err
 		}
 
-		_, err = cache.GetLength(file.RealPath())
+		cacheKey := uploadCacheKey(d, file)
+		_, err = cache.GetLength(cacheKey)
 		if err != nil {
 			return http.StatusNotFound, err
 		}
@@ -321,7 +337,7 @@ func tusDeleteHandler(cache UploadCache) handleFunc {
 			return errToStatus(err), err
 		}
 
-		cache.Complete(file.RealPath())
+		cache.Complete(cacheKey)
 
 		return http.StatusNoContent, nil
 	})

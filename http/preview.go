@@ -106,7 +106,9 @@ func handleImagePreview(
 		}
 	}
 
-	w.Header().Set("Cache-Control", "private")
+	// Previews are authorization-sensitive derived content. Do not let a local
+	// cache replay one after download permission or share access is revoked.
+	w.Header().Set("Cache-Control", "no-store")
 	http.ServeContent(w, r, file.Name, file.ModTime, bytes.NewReader(resizedImage))
 
 	return 0, nil

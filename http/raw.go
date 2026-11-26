@@ -226,7 +226,10 @@ func rawFileHandler(w http.ResponseWriter, r *http.Request, file *files.FileInfo
 	setContentDisposition(w, r, file)
 	w.Header().Add("Content-Security-Policy", `script-src 'none';`)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "private")
+	// File contents are authorization-sensitive and can change generation after
+	// a failed/retrying upload. "private" still permits a local cache to replay
+	// a response after permissions or a share link are revoked; never store it.
+	w.Header().Set("Cache-Control", "no-store")
 	http.ServeContent(w, r, file.Name, file.ModTime, fd)
 	return 0, nil
 }
