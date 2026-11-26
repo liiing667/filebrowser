@@ -25,20 +25,26 @@ func MatchHidden(path string) bool {
 	return path != "" && strings.HasPrefix(filepath.Base(path), ".")
 }
 
-// Matches matches a path against a rule. When fold is true the comparison is
-// case-insensitive: on a case-insensitive filesystem two paths differing only
-// in case name the same file, so a rule written for one spelling has to cover
-// the others or it can be trivially evaded.
+// Matches matches a path against a rule. When the optional fold argument is
+// true the comparison is case-insensitive: on a case-insensitive filesystem
+// two paths differing only in case name the same file, so a rule written for
+// one spelling has to cover the others or it can be trivially evaded.
 //
 // Regex rules are never folded. An admin-authored pattern means what it says,
 // and lowering its input would silently change it; use (?i) for those.
-func (r *Rule) Matches(path string, fold bool) bool {
+func (r *Rule) Matches(path string, fold ...bool) bool {
 	if r.Regex {
 		return r.Regexp.MatchString(path)
 	}
 
+	caseFold := len(fold) > 0 && fold[0]
 	rulePath := r.Path
-	if fold {
+	// A trailing slash is a spelling of the directory itself, not a different
+	// rule. Normalize it before the equality and path-segment boundary checks
+	// so "/dir/" matches "/dir" while still never matching "/dir_sibling".
+	rulePath = strings.TrimRight(rulePath, "/")
+
+	if caseFold {
 		path = strings.ToLower(path)
 		rulePath = strings.ToLower(rulePath)
 	}
@@ -47,12 +53,10 @@ func (r *Rule) Matches(path string, fold bool) bool {
 		return true
 	}
 
-	prefix := rulePath
-	if prefix != "/" && !strings.HasSuffix(prefix, "/") {
-		prefix += "/"
-	}
-
-	return strings.HasPrefix(path, prefix)
+	// Require the next path segment to begin after a slash. For the root rule
+	// TrimRight("/") leaves "", so this prefix is "/" and still matches all
+	// absolute paths.
+	return strings.HasPrefix(path, rulePath+"/")
 }
 
 // Regexp is a wrapper to the native regexp type where we
